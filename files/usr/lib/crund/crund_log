@@ -1,0 +1,21 @@
+#!/bin/sh
+LOGGER=$(which logger)
+LOG='[ crund ] '
+
+red_log()
+{
+	echo -e "\033[1;31m${1}\033[m"
+	[ ! -z "${LOGGER}" ] && ${LOGGER} -t ${LOG} "${1}"
+}
+
+green_log()
+{
+	echo -e "\033[1;32m${1}\033[m"
+	[ ! -z "${LOGGER}" ] && ${LOGGER} -t ${LOG} "${1}"
+}
+
+yellow_log()
+{
+	echo -e "\033[1;33m${1}\033[m"
+	[ ! -z "${LOGGER}" ] && ${LOGGER} -t ${LOG} "${1}"
+}

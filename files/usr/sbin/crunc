@@ -1,0 +1,509 @@
+#!/bin/sh
+. /usr/lib/crund/crund_def
+. ${LIB_DIR}/crund_log
+. ${JSHN_LIB}
+
+cmd_line()
+{
+	SUB_CMD=$1
+	case ${SUB_CMD} in
+		'run' | 'start' | 'stop' | 'rm' | 'rmi' | 'ps' | 'images' | 'image' | 'exec' | 'logs' | 'ip')
+			shift
+			cmd_${SUB_CMD}_parser $@
+			;;
+		'version')
+			cmd_version
+			;;
+		*)
+			cmd_parser $@
+			;;
+	esac
+}
+
+cmd_parser()
+{
+	while getopts "hv" ARGS
+	do
+		case ${ARGS} in
+			'h')
+				cmd_help
+				;;
+			'v')
+				cmd_version
+				;;
+		esac
+	done
+}
+
+cmd_ip_parser()
+{
+	SHORT=0
+	ARGS=$(getopt -o hs -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_logs_help
+				shift
+				;;
+			'-s')
+				SHORT=1
+				shift
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+	cmd_ip ${SHORT} $@
+}
+
+cmd_ip()
+{
+	SHORT=$1
+	shift
+	[ 1 -ne $SHORT ] && yellow_log "CONTAINER ID,IP" | awk -F ',' '{ for ( i = 1; i <= NF; i++) { printf "%22s",$i }; print "" }'
+	for CONTAINER_ID in $@
+	do
+		PID=$(cat ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/PID)
+		IP=$(ip netns exec net-${PID} ip addr show veth1 | grep 'inet ' | awk '{print $2}' | awk -F '/' '{print $1}')
+		if [ 1 -eq $SHORT ]
+		then
+			echo "${IP}" 
+		else
+			yellow_log "${CONTAINER_ID},${IP}" | awk -F ',' '{ for ( i = 1; i <= NF; i++) { printf "%22s",$i }; print "" }'
+		fi
+	done
+}
+
+cmd_ip_help()
+{
+	echo 'cmd_ip_help'
+}
+
+cmd_logs_parser()
+{
+	ARGS=$(getopt -o h -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_logs_help
+				shift
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+	cmd_logs $@
+}
+
+cmd_logs()
+{
+	[ -f ${CONTAINER_ROOTFS_DIR}/$1/log ] && {
+		cat ${CONTAINER_ROOTFS_DIR}/$1/log
+	}
+}
+
+cmd_logs_help()
+{
+	echo "cmd_logs_help"
+}
+
+cmd_run_parser()
+{
+	PORT_MAP=''
+	VOLUME_LIST=''
+	DEV_LIST=''
+	ARGS=$(getopt -o hp:v:d: -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_run_help
+				shift
+				;;
+			'-p')
+				PORT_MAP="${PORT_MAP}|$2"
+				shift 2
+				;;
+			'-v')
+				VOLUME_LIST="${VOLUME_LIST}|$2"
+				shift 2
+				;;
+			'-d')
+				DEV_LIST="${DEV_LIST}|$2"
+				shift 2
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+	IMG_NAME=$1
+	PORT_MAP=${PORT_MAP:1}
+	DEV_LIST=${DEV_LIST:1}
+	cmd_run "${IMG_NAME}" "${PORT_MAP}" "${VOLUME_LIST}" "${DEV_LIST}"
+}
+
+cmd_exec_parser()
+{
+	ARGS=$(getopt -o h -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_exec_help
+				shift
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+	cmd_exec $@
+}
+
+cmd_exec()
+{
+	[ -z "$1" ] && cmd_exec_help
+	CONTAINER_ID=$1
+	shift
+	PID=$(socat unix-client:${SOCK_FILE} exec:"${LIB_DIR}/crunc_handle container/${CONTAINER_ID}/pid"\!\!-)
+	if [ -z "$PID" ]
+	then
+		red_log 'No such running container.'
+	else
+		${LIB_DIR}/crund_exec ${PID} $@
+	fi
+}
+
+cmd_start_parser()
+{
+	ARGS=$(getopt -o h -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_start_help
+				shift
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+	CONTAINER_ID=$1
+	cmd_start "${CONTAINER_ID}"
+}
+
+cmd_start()
+{
+	CONTAINER_ID=$1
+	socat unix-client:${SOCK_FILE} exec:"${LIB_DIR}/crunc_handle container/${CONTAINER_ID}/start"\!\!-
+}
+
+cmd_stop_parser()
+{
+	ARGS=$(getopt -o h -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_stop_help
+				shift
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+	CONTAINER_ID=$1
+	while [ ! -z $CONTAINER_ID ]
+	do
+		shift
+		cmd_stop "${CONTAINER_ID}"
+		CONTAINER_ID=$1
+	done
+}
+
+cmd_stop()
+{
+	CONTAINER_ID=$1
+	socat unix-client:${SOCK_FILE} exec:"${LIB_DIR}/crunc_handle container/${CONTAINER_ID}/stop"\!\!-
+}
+
+cmd_rm_parser()
+{
+	F_F=0
+	ARGS=$(getopt -o hf -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_rm_help
+				shift
+				;;
+			'-f')
+				F_F=1
+				shift
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+
+	CONTAINER_ID=$1
+	while [ ! -z $CONTAINER_ID ]
+	do
+		shift
+		cmd_rm "${CONTAINER_ID}" "${F_F}"
+		CONTAINER_ID=$1
+	done
+}
+
+cmd_rm()
+{
+	CONTAINER_ID=$1
+	[ -z "${CONTAINER_ID}" ] && cmd_rm_help
+	ENFORCE=$2
+	socat unix-client:${SOCK_FILE} exec:"${LIB_DIR}/crunc_handle container/${CONTAINER_ID}/rm {\"enforce\":${ENFORCE}}"\!\!-
+}
+
+cmd_rmi_parser()
+{
+	ARGS=$(getopt -o h -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_rmi_help
+				shift
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+	IMG_NAME=$1
+	while [ ! -z $IMG_NAME ]
+	do
+		shift
+		cmd_rmi "${IMG_NAME}"
+		IMG_NAME=$1
+	done
+}
+
+cmd_ps_parser()
+{
+	A_F=0
+	ARGS=$(getopt -o ha -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_ps_help
+				shift
+				;;
+			'-a')
+				A_F=1
+				shift
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+	cmd_ps "$A_F"
+}
+
+cmd_images_parser()
+{
+	J_F=0
+	ARGS=$(getopt -o hj -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_images_help
+				shift
+				;;
+			'-j')
+				J_F=1
+				shift
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+	cmd_images "${J_F}"
+}
+
+cmd_image_parser()
+{
+	ARGS=$(getopt -o hl: -n "$0" -- "$@")
+	eval set -- "${ARGS}"
+	while true
+	do
+		case "$1" in
+			'-h')
+				cmd_image_help
+				shift
+				;;
+			'-l')
+				cmd_image_load "$2"
+				shift 2
+				;;
+			'--')
+				shift
+				break
+				;;
+		esac
+	done
+}
+
+cmd_run_help()
+{
+	echo "cmd_run_help"
+	exit 0
+}
+
+cmd_start_help()
+{
+	echo "cmd_start_help"
+	exit 0
+}
+
+cmd_stop_help()
+{
+	echo "cmd_stop_help"
+	exit 0
+}
+
+cmd_rm_help()
+{
+	echo "cmd_rm_help"
+	exit 0
+}
+
+cmd_rmi_help()
+{
+	echo "cmd_rmi_help"
+	exit 0
+}
+
+cmd_images_help()
+{
+	echo "cmd_images_help"
+	exit 0
+}
+
+cmd_ps_help()
+{
+	echo "cmd_ps_help"
+	exit 0
+}
+
+cmd_help()
+{
+	echo "help"
+	exit 0
+}
+
+cmd_version()
+{
+	echo "crunc / crund version : ${VERSION}"
+	exit 0
+}
+
+cmd_images()
+{
+	JSON=$(socat unix-client:${SOCK_FILE} exec:"${LIB_DIR}/crunc_handle images/json"\!\!-)
+	if [ 1 -eq $1 ]
+	then
+		echo "${JSON}"
+	else
+		yellow_log "IMAGE ID,NAME,TAG,ARCH" | awk -F ',' '{ for ( i = 1; i <= NF; i++) { printf "%22s",$i }; print "" }'
+		json_init
+		json_load "${JSON}"
+		json_get_type STATUS images
+		[ "${STATUS}" = array ] && {
+			json_select images
+			INDEX=1
+			json_get_type STATUS ${INDEX}
+			[ "${STATUS}" = object ] && {
+				json_select "$((INDEX++))"
+				json_get_var ID id
+				json_get_var NAME name
+				json_get_var TAG tag
+				json_get_var ARCH arch
+				json_select ..
+				yellow_log "${ID},${NAME},${TAG},${ARCH}" | awk -F ',' '{ for ( i = 1; i <= NF; i++) { printf "%22s",$i }; print "" }'
+			}
+		}
+	fi
+}
+
+cmd_ps()
+{
+	socat unix-client:${SOCK_FILE} exec:"${LIB_DIR}/crunc_handle container/ps {\"op_a\":\"$1\"}"\!\!-
+}
+
+cmd_run()
+{
+	[ -z "$1" ] && cmd_run_help
+	IMAGE=$(echo -n "$1" | sed 's/:/\\:/g')
+	PORT_MAP="$2"
+	VOLUME_LIST="$3"
+	DEV_LIST="$4"
+	#echo "cmd_run : {\"ports\":\"${PORT_MAP}\",\"volumes\":\"${VOLUME_LIST}\",\"devices\":\"${DEV_LIST}\"}"
+	socat unix-client:${SOCK_FILE} exec:"${LIB_DIR}/crunc_handle images/${IMAGE}/run {\"ports\":\"${PORT_MAP}\",\"volumes\":\"${VOLUME_LIST}\",\"devices\":\"${DEV_LIST}\"}"\!\!-
+}
+
+cmd_rmi()
+{
+	[ -z "$1" ] && cmd_rmi_help
+	IMAGE=$(echo -n "$1" | sed 's/:/\\:/g')
+	socat unix-client:${SOCK_FILE} exec:"${LIB_DIR}/crunc_handle images/${IMAGE}/rm"\!\!-
+}
+
+cmd_image_help()
+{
+	echo "cmd_image_help"
+	exit 0
+}
+
+cmd_image_load()
+{
+	if [ -f "$(pwd)/${1}" ]
+	then
+		socat unix-client:${SOCK_FILE} exec:"${LIB_DIR}/crunc_handle image/load $(pwd)/${1}"\!\!-
+	else
+		red_log "No such file : $1"
+	fi
+}
+
+cmd_line $@

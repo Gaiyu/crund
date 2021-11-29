@@ -1,0 +1,18 @@
+#!/bin/sh
+. /usr/lib/crund/crund_def
+. ${LIB_DIR}/crund_log
+. ${LIB_DIR}/cgroup_func
+mkdir -p ${TMP_DIR}
+mkdir -p ${IMAGE_DIR}
+mkdir -p ${CONTAINER_ROOTFS_DIR}
+SOCAT=$(which socat)
+[ -z "$SOCAT" ] && {
+	red_log "socat not found, exit."
+	exit 1
+}
+killall -9 ${SOCAT}
+rm -f ${SOCK_FILE}
+green_log "crund start."
+cgroup_init $$
+${SOCAT} unix-listen:${SOCK_FILE},fork exec:${HANDLE_FILE}
+cgroup_exit

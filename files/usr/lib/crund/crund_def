@@ -1,0 +1,15 @@
+#!/bin/sh
+VERSION='0.5'
+ROM_DIR='/rom/'
+TMP_DIR='/tmp/crund/'
+LIB_DIR='/usr/lib/crund/'
+IMAGE_DIR='/overlay/crund/images/'
+CONTAINER_ROOTFS_DIR='/overlay/crund/containers/'
+SOCK_FILE="${TMP_DIR}/crund.sock"
+HANDLE_FILE="${LIB_DIR}/crund_handle"
+CONTAINER_BR='br-container'
+CONTAINER_BR_IP='172.18.0.1'
+#TODO: Adapted to various cgroupfs mount
+CGROUP_ROOT='/sys/fs/cgroup/crund/'
+CGROUP_DIR='/sys/fs/cgroup/'
+JSHN_LIB='/usr/share/libubox/jshn.sh'

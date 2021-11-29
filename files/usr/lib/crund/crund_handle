@@ -1,0 +1,384 @@
+#!/bin/sh
+. /usr/lib/crund/crund_def
+. ${JSHN_LIB}
+. ${LIB_DIR}/crund_log
+. ${LIB_DIR}/cgroup_func
+. ${LIB_DIR}/backend/internal
+
+container_pid()
+{
+	CONTAINER_ID=$1
+	[ -f ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/PID ] && [ -d /proc/${PID} ] && cat ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/PID
+}
+
+container_ps()
+{
+	json_init
+	json_load "$2"
+	json_get_var OP_A op_a
+
+	yellow_log "CONTAINER ID,IMAGE,COMMAND,STATUS,PID" | awk -F ',' '{ for ( i = 1; i <= NF; i++) { printf "%22s",$i }; print "" }'
+	for CONTAINER in $(ls ${CONTAINER_ROOTFS_DIR})
+	do
+		[ ! -f ${CONTAINER_ROOTFS_DIR}/${CONTAINER}/config.json ] && continue
+		JSON=$(cat ${CONTAINER_ROOTFS_DIR}/${CONTAINER}/config.json)
+		[ -z "${JSON}" ] && continue
+		STATUS='stop'
+		PID=''
+		[ -f ${CONTAINER_ROOTFS_DIR}/${CONTAINER}/PID ] && {
+			PID=$(cat ${CONTAINER_ROOTFS_DIR}/${CONTAINER}/PID)
+			if [ -d /proc/${PID} ]
+			then
+				STATUS='up'
+			else
+				[ 0 -eq $OP_A ] && continue
+				PID=''
+			fi
+		}
+		json_init
+		json_load "${JSON}"
+		json_get_var ID id
+		json_get_var CMD cmd
+		json_get_var IMAGE image
+		yellow_log "${ID},${IMAGE},${CMD},${STATUS},${PID}" | awk -F ',' '{ for ( i = 1; i <= NF; i++) { printf "%22s",$i }; print "" }'
+	done
+}
+
+container_start()
+{
+	echo "container_start $1 | $2"
+	CONTAINER_ID="$1"
+	if [ -d ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID} ]
+	then
+		backend_run_container "${CONTAINER_ID}"
+	else
+		red_log "No such container id."
+	fi
+}
+
+container_stop()
+{
+	CONTAINER_ID="$1"
+	if [ -f ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/PID ]
+	then
+		PID=$(cat ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/PID)
+		kill -9 ${PID}
+		umount ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/rootfs
+	fi
+}
+
+container_rm()
+{
+	CONTAINER_ID="$1"
+	json_init
+	json_load "$2"
+	json_get_var ENFORCE enforce
+
+	if [ -d ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID} ]
+	then
+		PID=''
+		[ -f ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/PID ] && PID=$(cat ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/PID)
+		if [ 1 -eq $ENFORCE ]
+		then
+			[ ! -z "$PID" ] && kill -9 ${PID}
+			umount ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/rootfs
+			rm -rf ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}
+			green_log "$CONTAINER_ID"
+		else
+			if [ -d /proc/${PID} ]
+			then
+				red_log "Container [ $CONTAINER_ID ] is running."
+			else
+				kill -9 ${PID}
+				umount ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/rootfs
+				rm -rf ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}
+				green_log "$CONTAINER_ID"
+			fi
+		fi
+	else
+		red_log 'No such container.'
+	fi
+}
+
+images_json()
+{
+	RET='{"images":['
+	for line in $(ls ${IMAGE_DIR}/*.json 2> /dev/null)
+	do
+		ID="$(sha256sum $line | head -c 12)"
+		json_init
+		json_load "$(cat $line)"
+		json_get_var NAME name
+		json_get_var TAG tag
+		json_get_var ARCH arch
+		RET="${RET}{\"id\":\"$ID\",\"name\":\"$NAME\",\"tag\":\"$TAG\",\"arch\":\"$ARCH\"},"
+	done
+	RET="${RET%,*}]}"
+	echo -ne "${RET}"
+}
+
+get_img_config()
+{
+	IMG_NAME=$(echo -n $1 | awk -F ':' '{print $1}')
+    IMG_TAG=$(echo -n $1 | awk -F ':' '{print $NF}')
+	[ ! -z "${IMG_NAME}" ] && [ ! -z "${IMG_TAG}" ] && echo -n "${IMAGE_DIR}/${IMG_NAME}.${IMG_TAG}.img.json"
+}
+
+img_layer()
+{
+	OP="$1"
+	CONFIG_FILE="$2"
+	LAYER_CB="$3"
+	CONTAINER_ID="$4"
+	if [ -f "${CONFIG_FILE}" ]
+	then
+		IMG_JSON="$(cat ${CONFIG_FILE})"
+		json_init
+		json_load "${IMG_JSON}"
+		if json_is_a layers array
+		then
+			json_select layers
+			IDX=1
+			while json_is_a ${IDX} string
+			do
+				json_get_var LAYER $IDX
+				case ${OP} in
+					'rm')
+						${LAYER_CB} "${LAYER}" "${CONFIG_FILE}"
+						;;
+					'run')
+						${LAYER_CB} "${LAYER}" "${CONTAINER_ID}"
+						;;
+				esac
+				let IDX++
+			done
+		fi
+	else
+		echo "Err"
+	fi
+}
+
+img_layer_rm_cb()
+{
+	LAYER="$1"
+	CFG_FILE_NAME="$(echo -n $2 | awk -F '/' '{print $NF}')"
+	[ -z "$(find ${IMAGE_DIR} -name '*.json' | grep -v ${CFG_FILE_NAME} | xargs grep -n ${LAYER})" ] && {
+		rm -rf ${IMAGE_DIR}/sha256/${LAYER}
+	}
+}
+
+images_rm()
+{
+	CONFIG_FILE=$(get_img_config $1)
+	if [ ! -z "${CONFIG_FILE}" ]
+	then
+		UNUSED=1
+		for CONTAINER in $(ls ${CONTAINER_ROOTFS_DIR})
+		do
+			[ ! -f ${CONTAINER_ROOTFS_DIR}/${CONTAINER}/config.json ] && continue
+			JSON=$(cat ${CONTAINER_ROOTFS_DIR}/${CONTAINER}/config.json)
+			[ -z "${JSON}" ] && continue
+			json_init
+			json_load "${JSON}"
+			json_get_var IMAGE image
+			[ $1 = "${IMAGE}" ] && {
+				UNUSED=0
+				break
+			}
+		done
+
+		if [ 1 -eq $UNUSED ]
+		then
+			CONFIG_FILE=$(get_img_config $1)
+			if [ -z $(img_layer 'rm' "${CONFIG_FILE}" "img_layer_rm_cb" "") ]
+			then
+				rm -f ${CONFIG_FILE}
+				green_log 'OK'
+			else
+				red_log "Remove image [$1] error."
+			fi
+		else
+			red_log "Image [$1] is busy."
+		fi
+	else
+		red_log "No such image."
+	fi
+}
+
+img_layer_run_cb()
+{
+	LAYER="$1"
+	CONTAINER_ID="$2"
+	USE_TMPFS=0
+	if [ 1 -eq ${USE_TMPFS} ]
+	then
+		[ ! -d "${IMAGE_DIR}/sha256/${LAYER}/rootfs" ] && {
+			mkdir -p ${IMAGE_DIR}/sha256/${LAYER}/rootfs
+			mkdir -p ${TMP_DIR}/${LAYER}
+			tar -C ${TMP_DIR}/${LAYER} -zxf ${IMAGE_DIR}/sha256/${LAYER}/layer.tar.gz
+			tar -C ${IMAGE_DIR}/sha256/${LAYER}/rootfs -xf ${TMP_DIR}/${LAYER}/layer.tar
+			rm -rf ${TMP_DIR}/${LAYER}
+		}
+	else
+		[ ! -d "${IMAGE_DIR}/sha256/${LAYER}/rootfs" ] && {
+			mkdir -p ${IMAGE_DIR}/sha256/${LAYER}/rootfs
+			tar -C ${IMAGE_DIR}/sha256/${LAYER} -zxf ${IMAGE_DIR}/sha256/${LAYER}/layer.tar.gz
+			tar -C ${IMAGE_DIR}/sha256/${LAYER}/rootfs -xf ${IMAGE_DIR}/sha256/${LAYER}/layer.tar
+			rm -f ${IMAGE_DIR}/sha256/${LAYER}/layer.tar
+		}
+	fi
+
+	touch ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/LL
+	echo -n ":${IMAGE_DIR}/sha256/${LAYER}/rootfs" >> ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/LL
+}
+
+images_run()
+{
+	CONTAINER_ID=$(cat /proc/sys/kernel/random/uuid | awk -F '-' '{print $NF}')
+	mkdir -p ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}
+	CONFIG_FILE=$(get_img_config $1)
+
+	# TODO: parser the payload
+	PALOAD="$2"
+	json_init
+	json_load "${PALOAD}"
+	json_get_var DEVICES devices
+	json_get_var VOLUMES volumes
+
+	DEVICES=$(echo -n ${DEVICES} | sed 's/|/ /g')
+	VOL_LIST=$(echo -n ${VOLUMES} | sed 's/|/ -v /g')
+
+	DEV_LIST=''
+	[ ! -z "${DEVICES}" ] && {
+		for dev in ${DEVICES}
+		do
+			DEV_TYPE=$(ls -alh /dev/$dev | head -c 1)
+			[ -z "${DEV_TYPE}" ] && continue
+			MAJOR_NUM=$(ls -alh /dev/$dev | awk -F ',' '{print $1}' | awk '{print $NF}')
+			MINOR_NUM=$(ls -alh /dev/$dev | awk -F ',' '{print $NF}' | awk '{print $1}')
+			DEV_LIST="${DEV_LIST} -d $dev,${MAJOR_NUM},${MINOR_NUM},${DEV_TYPE}"
+		done
+		DEV_LIST=${DEV_LIST:1}
+	}
+
+	if [ -z $(img_layer 'run' "${CONFIG_FILE}" "img_layer_run_cb" "${CONTAINER_ID}") ]
+	then
+		IMG_JSON="$(cat ${CONFIG_FILE})"
+		json_init
+		json_load "${IMG_JSON}"
+		json_get_var BASED_ON_ROOM based_on_rom
+		json_get_var NAME name
+		json_get_var TAG tag
+		ENV_LIST=''
+		if json_is_a env array
+		then
+			json_select env
+			IDX=1
+			while json_is_a ${IDX} string
+			do
+				json_get_var VAL $IDX
+				ENV_LIST="${ENV_LIST} -e ${VAL}"
+				let IDX++
+			done
+		fi
+		ENV_LIST=${ENV_LIST:1}
+		json_select ..
+
+		CMD_LIST=''
+		if json_is_a entrypoint array
+		then
+			json_select entrypoint
+			IDX=1
+			while json_is_a ${IDX} string
+			do
+				json_get_var CMD $IDX
+				CMD_LIST="${CMD_LIST} ${CMD}"
+				let IDX++
+			done
+		fi
+		CMD_LIST=${CMD_LIST:1}
+
+		LOWER_LIST=$(cat ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/LL)
+		if [ 1 -eq ${BASED_ON_ROOM} ]
+		then
+			LOWER_LIST="/rom${LOWER_LIST}"
+		else
+			LOWER_LIST=${LOWER_LIST:1}
+		fi
+		rm -f ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/LL
+		rm -f ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/config.json
+		echo -n "{\"id\":\"${CONTAINER_ID}\",\"image\":\"${NAME}:${TAG}\",\"vol\":\"${VOL_LIST}\",\"dev\":\"${DEV_LIST}\",\"env\":\"${ENV_LIST}\",\"cmd\":\"${CMD_LIST}\",\"lowerdir\":\"${LOWER_LIST}\"}" > ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/config.json
+		backend_run_container "${CONTAINER_ID}"
+	else
+		red_log 'No such image.'
+	fi
+}
+
+image_load()
+{
+	IMAGE_TAR="/${2}"
+	tar -C ${IMAGE_DIR} -zxf ${IMAGE_TAR}
+}
+
+sock_handle()
+{
+	L1=''
+	L2=''
+	L3=''
+	PARA=''
+	CMD=''
+	GOOD=0
+	while true
+	do
+		LINE=''
+		read LINE
+		LINE=$(echo -ne $LINE | sed 's/\r//g')
+		LINE=$(echo -ne $LINE | sed 's/^[/]*//g')
+		case "${LINE}" in
+			'bye' | '')
+				echo 'sunshine!'
+				break
+				;;
+			images/json | images/*/rm | container/*/stop | container/*/start | container/*/pid)
+				L1=$(echo -n $LINE | awk -F '/' '{print $1}')
+				L2=$(echo -n $LINE | awk -F '/' '{print $2}')
+				L3=$(echo -n $LINE | awk -F '/' '{print $3}')
+				GOOD=1
+				if [ -z "$L3" ]
+				then
+					CMD="${L1}_${L2}"
+					${CMD}
+				else
+					CMD="${L1}_${L3}"
+					PARA="${L2}"
+					${CMD} "${PARA}"
+				fi
+				break
+				;;
+			images/*/run | container/*/rm | image/load | container/ps)
+				L1=$(echo -n $LINE | awk -F '/' '{print $1}')
+				L2=$(echo -n $LINE | awk -F '/' '{print $2}')
+				L3=$(echo -n $LINE | awk -F '/' '{print $3}')
+				GOOD=1
+				if [ -z "$L3" ]
+				then
+					CMD="${L1}_${L2}"
+				else
+					CMD="${L1}_${L3}"
+					PARA="${L2}"
+				fi
+				;;
+			*)
+				if [ 1 -eq ${GOOD} ]
+				then
+					${CMD} "${PARA}" "${LINE}"
+					break
+				else
+					echo "unsupported!"
+				fi
+				;;
+		esac
+	done
+}
+
+sock_handle

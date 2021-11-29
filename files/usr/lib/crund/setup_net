@@ -1,0 +1,13 @@
+#!/bin/sh
+. /usr/lib/crund/crund_def
+
+PID="$1"
+ip link add veth${PID} type veth peer name veth1
+ip link set veth${PID} up
+ip link set veth${PID} master ${CONTAINER_BR}
+ip link set veth1 netns ${PID}
+
+mkdir -p /var/run/netns
+ln -sf /proc/${PID}/ns/net /var/run/netns/net-${PID}
+ip netns exec net-${PID} ip link set veth1 up
+ip netns exec net-${PID} udhcpc -i veth1

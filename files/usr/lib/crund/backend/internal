@@ -1,0 +1,49 @@
+#!/bin/sh
+
+backend_run_container()
+{
+	CONTAINER_ID="$1"
+	CONFIG_FILE="${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/config.json"
+	LOG_FILE="${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/log"
+	if [ ! -f ${CONFIG_FILE} ]
+	then
+		echo 'Err'
+	else
+		cgroup_container_setup ${CONTAINER_ID}
+		JSON="$(cat ${CONFIG_FILE})"
+		json_init
+		json_load "${JSON}"
+		json_get_var CMD_LIST cmd
+		json_get_var LOWERDIR lowerdir
+		json_get_var ENV_LIST env
+		json_get_var DEV_LIST dev
+		json_get_var VOL_LIST vol
+		mkdir -p ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/U
+		mkdir -p ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/W
+		mkdir -p ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/rootfs
+
+		ADD_DEV_CMD="cgroup_container_add_dev ${DEV_LIST} ${CONTAINER_ID}"
+		${ADD_DEV_CMD}
+
+		if ! mountpoint -q $1
+		then
+			mount -t overlay overlay -o lowerdir=${LOWERDIR},upperdir=${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/U,workdir=${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/W ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/rootfs
+		fi
+
+		${LIB_DIR}/crund_launcher -p ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/PID ${ENV_LIST} ${DEV_LIST} ${VOL_LIST} -r ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/rootfs -h ${CONTAINER_ID} -C ${CMD_LIST} > ${LOG_FILE}
+
+		PID=$(cat ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/PID)
+		if [ -z $PID ]
+		then
+			red_log ${CONTAINER_ID}
+		else
+			${LIB_DIR}/setup_net ${PID}
+			mkdir -p ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/rootfs/etc/
+			rm -f ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/rootfs/etc/resolv.conf
+			echo "nameserver ${CONTAINER_BR_IP}" >> ${CONTAINER_ROOTFS_DIR}/${CONTAINER_ID}/rootfs/etc/resolv.conf
+			cgroup_container_start ${CONTAINER_ID} ${PID}
+			kill -SIGQUIT ${PID}
+			green_log ${CONTAINER_ID}
+		fi
+	fi
+}
