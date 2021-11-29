@@ -1,0 +1,121 @@
+#!/bin/sh
+red_log()
+{
+	echo -e "\033[1;31m${LOG}${1}\033[m"
+}
+
+green_log()
+{
+	echo -e "\033[1;32m${LOG}${1}\033[m"
+}
+
+yellow_log()
+{
+	echo -e "\033[1;33m${LOG}${1}\033[m"
+}
+
+show_help()
+{
+	yellow_log "Useage : crund_convert_image [OPTIONS] <docker image>"
+	yellow_log "OPTIONS:"
+	yellow_log "\t-b\tUse openwrt '/rom' as base image."
+	yellow_log ""
+	exit 0
+}
+
+[ -z "$(which jq)" ] && sudo apt-get install jq
+
+DOCKER_IMG=''
+USE_ROM_AS_BASE=0
+
+ARGS=$(getopt -o hb -n "$0" -- "$@")
+eval set -- "${ARGS}"
+while true
+do
+	case "$1" in
+		'-h')
+			show_help
+			shift
+			;;
+		'-b')
+			USE_ROM_AS_BASE=1
+			shift
+			;;
+		'--')
+			shift
+			break
+			;;
+	esac
+done
+
+DOCKER_IMG="$1"
+DOCKER_IMG_NAME=$(echo -n ${DOCKER_IMG} | awk -F ':' '{print $1}')
+DOCKER_IMG_TAG=$(echo -n ${DOCKER_IMG} | awk -F ':' '{print $2}')
+
+DOKCER_IMG_ID=$(docker images -q ${DOCKER_IMG})
+[ -z "${DOKCER_IMG_ID}" ] && {
+	red_log "No such docker image founded : ${DOCKER_IMG}"
+	exit 1
+}
+
+[ -z "${DOCKER_IMG_TAG}" ] && {
+	red_log "Missing docker image tag."
+	exit 1
+}
+
+CRUND_IMG_TAG=${DOCKER_IMG_TAG}
+CRUND_IMG_NAME="$(echo -n ${DOCKER_IMG_NAME} | sed 's/\//./g')"
+TMP_DIR="$(pwd)/__TMP_${CRUND_IMG_NAME}.${CRUND_IMG_TAG}"
+rm -rf ${TMP_DIR}
+mkdir -p ${TMP_DIR}
+
+yellow_log "Converting docker image : ${DOCKER_IMG}"
+pushd ${TMP_DIR} > /dev/null
+docker save -o ${CRUND_IMG_NAME}.${CRUND_IMG_TAG}.docker.tar ${DOCKER_IMG}
+
+mkdir -p docker_untar
+pushd docker_untar > /dev/null
+
+tar -xf ../${CRUND_IMG_NAME}.${CRUND_IMG_TAG}.docker.tar
+DOCKER_CONFIG_JSON=$(cat manifest.json | jq -c '.[0].Config' | sed 's/"//g')
+ID=0
+[ 1 -eq ${USE_ROM_AS_BASE} ] && ID=1
+while true
+do
+	[ -z "$(cat manifest.json  | jq -c ".[0].Layers[${ID}]")" ] || [ $(cat manifest.json  | jq -c ".[0].Layers[${ID}]") = null ] && break
+	DST_PATH=$(cat ${DOCKER_CONFIG_JSON} | jq -c ".rootfs.diff_ids[${ID}]" | sed 's/:/\//g' | sed 's/"//g')
+	mkdir -p ${DST_PATH}
+	cat manifest.json | jq -c ".[0].Layers[${ID}]" | xargs -I '{}' cp -r '{}' ${DST_PATH}
+	pushd ${DST_PATH} > /dev/null
+	tar -zcf layer.tar.gz layer.tar
+	rm -f layer.tar
+	popd > /dev/null
+	let ID++
+done
+mv sha256 ..
+
+ROOTFS_SHA256_LAYERS=$(echo -n $(cat ${DOCKER_CONFIG_JSON} | jq -c '.rootfs.diff_ids' | sed 's/sha256://g'))
+[ 1 -eq ${USE_ROM_AS_BASE} ] && {
+	LAYER_SIZE=$(echo -n ${ROOTFS_SHA256_LAYERS} | jq '.[]' | wc -l)
+	if [ ${LAYER_SIZE} -le 1 ]
+	then
+		ROOTFS_SHA256_LAYERS=$(echo -n ${ROOTFS_SHA256_LAYERS} | jq '.[1:1]' -c)
+	else
+		ROOTFS_SHA256_LAYERS=$(echo -n ${ROOTFS_SHA256_LAYERS} | jq ".[1:${LAYER_SIZE}]" -c)
+	fi
+}
+
+ROOTFS_ARCH=$(echo -n $(cat ${DOCKER_CONFIG_JSON} | jq -c '.architecture'))
+ROOTFS_ENV=$(echo -n $(cat ${DOCKER_CONFIG_JSON} | jq -c '.config.Env'))
+ROOTFS_WORKDIR=$(echo -n $(cat ${DOCKER_CONFIG_JSON} | jq -c '.config.WorkingDir'))
+ROOTFS_ENTRYPOINT=$(echo -n $(cat ${DOCKER_CONFIG_JSON} | jq -c '.config.Entrypoint'))
+echo -n "{\"name\":\"${CRUND_IMG_NAME}\",\"tag\":\"${CRUND_IMG_TAG}\",\"arch\":${ROOTFS_ARCH},\"env\":${ROOTFS_ENV},\"workdir\":${ROOTFS_WORKDIR},\"entrypoint\":${ROOTFS_ENTRYPOINT},\"layers\":${ROOTFS_SHA256_LAYERS},\"based_on_rom\":\"${USE_ROM_AS_BASE}\"}" > ../${CRUND_IMG_NAME}.${CRUND_IMG_TAG}.img.json
+
+popd > /dev/null
+
+rm -rf docker_untar ${CRUND_IMG_NAME}.${CRUND_IMG_TAG}.docker.tar
+tar -zcf ${CRUND_IMG_NAME}.${CRUND_IMG_TAG}.crund.tar ./*
+mv ${CRUND_IMG_NAME}.${CRUND_IMG_TAG}.crund.tar ..
+popd > /dev/null
+rm -rf ${TMP_DIR}
+green_log "Success output : ${CRUND_IMG_NAME}.${CRUND_IMG_TAG}.crund.tar"
